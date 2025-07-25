@@ -81,7 +81,7 @@ macro_rules! permission_required {
 
         async fn is_authorized(auth_session: $crate::AuthSession<$backend_type>) -> bool {
             if let Some(ref user) = auth_session.user().await {
-                if auth_session.backend.has_perm(user, "Admin".into()).await.unwrap_or(false) {
+                if auth_session.backend().has_perm(user, "Admin".into()).await.unwrap_or(false) {
                     return true
                 }
                 let mut has_all_permissions = true;
@@ -116,7 +116,7 @@ macro_rules! permission_required {
 
         async fn is_authorized(auth_session: $crate::AuthSession<$backend_type>) -> bool {
             if let Some(ref user) = auth_session.user().await {
-                if auth_session.backend.has_perm(user, "Admin".into()).await.unwrap_or(false) {
+                if auth_session.backend().has_perm(user, "Admin".into()).await.unwrap_or(false) {
                     return true
                 }
                 let mut has_all_permissions = true;
