@@ -1,5 +1,5 @@
 use std::{fmt::Debug, sync::Arc};
-
+use aide::OperationIo;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
@@ -80,7 +80,7 @@ struct Inner<Backend: AuthnBackend> {
 /// returned. In the case the credentials are invalid, no user will be returned.
 /// When we do have a user, it's then possible to set the state of the session
 /// so that the user is logged in.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, OperationIo)]
 pub struct AuthSession<Backend: AuthnBackend> {
     backend: Backend,
     inner: Arc<Mutex<Inner<Backend>>>,
