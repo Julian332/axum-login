@@ -54,7 +54,7 @@ where
     }
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
-        let span = tracing::info_span!("call", user.id = tracing::field::Empty);
+        // let span = tracing::info_span!("call", user.id = tracing::field::Empty);
 
         let backend = self.backend.clone();
         let data_key = self.data_key;
@@ -96,8 +96,7 @@ where
                 req.extensions_mut().insert(auth_session);
 
                 inner.call(req).await
-            }
-            .instrument(span),
+            },
         )
     }
 }
