@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "jwt")]
 use tracing::warn;
 
 /// Type alias for the backend user's ID.
@@ -71,7 +72,10 @@ pub trait AuthUser: Debug + Clone + Send + Sync {
     where
         Self: serde::Serialize,
     {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+        serde_json::to_value(self).unwrap_or_else(|e| {
+            warn!(?e, "could not serialize user into JWT claims");
+            serde_json::Value::Null
+        })
     }
 
     /// Reconstructs the user from JWT claims previously produced by

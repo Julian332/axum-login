@@ -162,8 +162,15 @@ impl JwtConfig {
         User: AuthUser + for<'de> Deserialize<'de>,
     {
         let data =
-            jsonwebtoken::decode::<Claims<User::Id>>(token, &self.decoding_key, &self.validation)
-                .ok()?;
+            match jsonwebtoken::decode::<Claims<User::Id>>(token, &self.decoding_key, &self.validation) {
+                Ok(data) => data,
+                Err(err) => {
+                    // Routine for expired/tampered/foreign tokens; log at debug
+                    // so it's diagnosable without being noisy.
+                    tracing::debug!(err = %err, "jwt verification failed");
+                    return None;
+                }
+            };
         User::from_claims(&data.claims.user)
     }
 }

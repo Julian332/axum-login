@@ -13,7 +13,6 @@ use tower_sessions::{
     service::{CookieController, PlaintextCookie},
     Session, SessionManager, SessionManagerLayer, SessionStore,
 };
-use tracing::Instrument;
 
 use crate::{AuthSession, AuthUser, AuthnBackend};
 
