@@ -70,6 +70,14 @@ pub struct JwtConfig {
     /// HTTPS). Defaults to `true`; set to `false` for local development over
     /// plain HTTP.
     pub secure: bool,
+
+    /// Whether to transparently re-issue the token cookie when an incoming
+    /// token has reached the last third of its lifetime. Defaults to `true`.
+    ///
+    /// This keeps active sessions alive without a re-login while letting idle
+    /// tokens expire. The threshold is computed from the token's own `iat`/`exp`
+    /// claims, not [`ttl`](Self::ttl).
+    pub sliding_refresh: bool,
 }
 
 impl JwtConfig {
@@ -87,6 +95,7 @@ impl JwtConfig {
             ttl: Duration::from_secs(60 * 60 * 24),
             cookie_name: DEFAULT_JWT_COOKIE_NAME.to_string(),
             secure: true,
+            sliding_refresh: true,
         }
     }
 
@@ -106,6 +115,29 @@ impl JwtConfig {
     pub fn with_secure(mut self, secure: bool) -> Self {
         self.secure = secure;
         self
+    }
+
+    /// Sets whether the token cookie is transparently re-issued once an incoming
+    /// token enters the last third of its lifetime.
+    pub fn with_sliding_refresh(mut self, sliding_refresh: bool) -> Self {
+        self.sliding_refresh = sliding_refresh;
+        self
+    }
+
+    /// Returns `true` when sliding refresh is enabled and a token with the given
+    /// `iat`/`exp` claims has ≤ 1/3 of its lifetime remaining.
+    fn should_refresh(&self, iat: u64, exp: u64) -> bool {
+        if !self.sliding_refresh || exp <= iat {
+            return false;
+        }
+        let now = now_unix();
+        if now >= exp {
+            return false; // Already expired; `decode` would have rejected it.
+        }
+        let lifetime = exp - iat;
+        let remaining = exp - now;
+        // remaining <= lifetime / 3, done in integers to avoid rounding.
+        remaining.saturating_mul(3) <= lifetime
     }
 
     /// Builds the `Set-Cookie` header value carrying an issued token.
@@ -161,6 +193,15 @@ impl JwtConfig {
     where
         User: AuthUser + for<'de> Deserialize<'de>,
     {
+        self.decode_with_expiry(token).map(|(user, _, _)| user)
+    }
+
+    /// Like [`decode`](Self::decode) but also returns the token's `iat` and
+    /// `exp` claims (in that order), for sliding-refresh decisions.
+    pub(crate) fn decode_with_expiry<User>(&self, token: &str) -> Option<(User, u64, u64)>
+    where
+        User: AuthUser + for<'de> Deserialize<'de>,
+    {
         let data =
             match jsonwebtoken::decode::<Claims<User::Id>>(token, &self.decoding_key, &self.validation) {
                 Ok(data) => data,
@@ -171,7 +212,8 @@ impl JwtConfig {
                     return None;
                 }
             };
-        User::from_claims(&data.claims.user)
+        let user = User::from_claims(&data.claims.user)?;
+        Some((user, data.claims.iat, data.claims.exp))
     }
 }
 
@@ -206,6 +248,23 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Signs a fresh token for the session's current user and returns its
+/// `Set-Cookie` header value, or `None` if there is no user or signing fails.
+async fn issue_cookie<Backend>(session: &AuthSession<Backend>, config: &JwtConfig) -> Option<String>
+where
+    Backend: AuthnBackend,
+    Backend::User: Serialize,
+{
+    let user = session.user().await?;
+    match config.encode(&user) {
+        Ok(token) => Some(config.build_set_cookie(&token)),
+        Err(err) => {
+            tracing::error!(err = %err, "could not encode jwt");
+            None
+        }
+    }
 }
 
 /// A cookie action deferred until the response is available.
@@ -264,8 +323,15 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
         Box::pin(async move {
-            let user = extract_token(req.headers(), &config.cookie_name)
-                .and_then(|token| config.decode::<Backend::User>(&token));
+            let mut needs_refresh = false;
+            let user = extract_token(req.headers(), &config.cookie_name).and_then(|token| {
+                config
+                    .decode_with_expiry::<Backend::User>(&token)
+                    .map(|(user, iat, exp)| {
+                        needs_refresh = config.should_refresh(iat, exp);
+                        user
+                    })
+            });
 
             if let Some(ref user) = user {
                 tracing::Span::current().record("user.id", user.id().to_string());
@@ -277,29 +343,22 @@ where
 
             let mut res = inner.call(req).await?;
 
-            if let Some(pending) = handle.take_pending_cookie().await {
-                let cookie = match pending {
-                    PendingCookie::Issue => match handle.user().await {
-                        Some(user) => match config.encode(&user) {
-                            Ok(token) => Some(config.build_set_cookie(&token)),
-                            Err(err) => {
-                                tracing::error!(err = %err, "could not encode jwt");
-                                None
-                            }
-                        },
-                        None => None,
-                    },
-                    PendingCookie::Clear => Some(config.build_clear_cookie()),
-                };
+            // An explicit login/logout during the request wins over sliding
+            // refresh; otherwise re-issue when the token entered its last third.
+            let cookie = match handle.take_pending_cookie().await {
+                Some(PendingCookie::Clear) => Some(config.build_clear_cookie()),
+                Some(PendingCookie::Issue) => issue_cookie(&handle, &config).await,
+                None if needs_refresh => issue_cookie(&handle, &config).await,
+                None => None,
+            };
 
-                if let Some(cookie) = cookie {
-                    match HeaderValue::from_str(&cookie) {
-                        Ok(value) => {
-                            res.headers_mut().append(http::header::SET_COOKIE, value);
-                        }
-                        Err(err) => {
-                            tracing::error!(err = %err, "could not build Set-Cookie header");
-                        }
+            if let Some(cookie) = cookie {
+                match HeaderValue::from_str(&cookie) {
+                    Ok(value) => {
+                        res.headers_mut().append(http::header::SET_COOKIE, value);
+                    }
+                    Err(err) => {
+                        tracing::error!(err = %err, "could not build Set-Cookie header");
                     }
                 }
             }
@@ -477,6 +536,29 @@ mod tests {
     fn extract_returns_none_when_absent() {
         let headers = HeaderMap::new();
         assert!(extract_token(&headers, DEFAULT_JWT_COOKIE_NAME).is_none());
+    }
+
+    #[test]
+    fn should_refresh_only_in_last_third() {
+        let cfg = config();
+        let now = now_unix();
+
+        // Lifetime 90s: refresh once remaining <= 30s (last third).
+        assert!(cfg.should_refresh(now - 60, now + 30)); // remaining 30 == 1/3
+        assert!(cfg.should_refresh(now - 80, now + 10)); // remaining 10
+        assert!(!cfg.should_refresh(now - 45, now + 45)); // remaining 45 > 1/3
+        assert!(!cfg.should_refresh(now, now + 90)); // fresh
+    }
+
+    #[test]
+    fn should_refresh_respects_toggle_and_bad_bounds() {
+        let now = now_unix();
+        // Disabled.
+        assert!(!config()
+            .with_sliding_refresh(false)
+            .should_refresh(now - 60, now + 30));
+        // Degenerate exp <= iat.
+        assert!(!config().should_refresh(now, now));
     }
 }
 
@@ -700,5 +782,66 @@ mod middleware_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_string(res).await, "anon");
+    }
+
+    // Signs a token with explicit iat/exp so refresh behavior is deterministic.
+    fn craft_token(iat: u64, exp: u64) -> String {
+        let config = JwtConfig::from_secret(b"test-secret");
+        let claims = Claims {
+            sub: 1i64,
+            iat,
+            exp,
+            user: serde_json::to_value(User {
+                id: 1,
+                name: "alice".to_string(),
+            })
+            .unwrap(),
+        };
+        jsonwebtoken::encode(&Header::new(config.algorithm), &claims, &config.encoding_key).unwrap()
+    }
+
+    async fn whoami_with_cookie(app: Router, token: &str) -> Response<Body> {
+        app.oneshot(
+            Request::builder()
+                .uri("/whoami")
+                .header(header::COOKIE, format!("axum-login.jwt={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sliding_refresh_reissues_cookie_in_last_third() {
+        let app = app(Backend {
+            get_user_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let now = now_unix();
+        // Lifetime 1000s, only 100s remaining → within the last third.
+        let token = craft_token(now - 900, now + 100);
+
+        let res = whoami_with_cookie(app, &token).await;
+        let cookie = set_cookie(&res).expect("token in last third should be re-issued");
+        assert!(cookie.starts_with("axum-login.jwt="));
+        assert!(cookie.contains("Max-Age="));
+        assert!(!cookie.contains("Max-Age=0")); // a real token, not a clear
+        assert_eq!(body_string(res).await, "alice");
+    }
+
+    #[tokio::test]
+    async fn fresh_token_is_not_reissued() {
+        let app = app(Backend {
+            get_user_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let now = now_unix();
+        // Full lifetime remaining → no refresh.
+        let token = craft_token(now, now + 1000);
+
+        let res = whoami_with_cookie(app, &token).await;
+        assert!(
+            set_cookie(&res).is_none(),
+            "a fresh token must not be re-issued"
+        );
     }
 }

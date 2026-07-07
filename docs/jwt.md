@@ -62,7 +62,18 @@ handler 返回后，中间件通过共享句柄读取标记（`take_pending_cook
   `Set-Cookie: axum-login.jwt=…; Path=/; HttpOnly; SameSite=Lax; Max-Age=<ttl>`
   （`with_secure(true)` 时追加 `Secure`）。
 - **Clear** → 写 `Max-Age=0` 过期 cookie。
-- 无标记 → 原样返回。
+- **无标记，但 token 剩余寿命 ≤ 1/3** → 滑动刷新（见下）自动重签。
+- 其余 → 原样返回。
+
+### 滑动刷新（sliding refresh）
+
+默认开启。当解码出有效 token 且其剩余寿命 ≤ 总寿命的 1/3 时，即使本次请求没有
+`login`/`logout`，中间件也会用当前用户重签一份新 cookie。这样活跃会话不必重新登录
+即可续期，而闲置的 token 仍会到期失效。
+
+- 判定用 token 自带的 `iat`/`exp`（`3 × 剩余 ≤ iat..exp 总寿命`），不依赖 `ttl`。
+- 显式 `login`（Issue）/`logout`（Clear）**优先**于滑动刷新。
+- 关闭：`JwtConfig::from_secret(..).with_sliding_refresh(false)`。
 
 ## F. 完整时序 · 一次登录 + 一次访问
 
