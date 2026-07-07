@@ -12,8 +12,7 @@ use axum_login::{
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use tower::ServiceExt;
-use tower_sessions::SessionManagerLayer;
-use tower_sessions_sqlx_store::{sqlx::SqlitePool, SqliteStore};
+use tower_sessions::{MemoryStore, SessionManagerLayer};
 
 #[derive(Clone, Debug)]
 struct User;
@@ -90,9 +89,7 @@ impl AuthzBackend for TestBackend {
 
 macro_rules! setup_auth_layer {
     () => {{
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        let session_store = SqliteStore::new(pool.clone());
-        session_store.migrate().await.unwrap();
+        let session_store = MemoryStore::default();
 
         let session_layer = SessionManagerLayer::new(session_store).with_secure(false);
 

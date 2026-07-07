@@ -21,5 +21,11 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tower-sessions = { version = "0.15.0", default-features = false, features = [
   "signed",
 ] }
+# UPSTREAM-BLOCKED: tower-sessions-sqlx-store 0.15 still pins
+# tower-sessions-core 0.14, which conflicts with tower-sessions 0.15 (core
+# 0.15) used above and by axum-login. This example (and the `sqlite_example`
+# integration test that runs it) will not compile until a sqlx-store release
+# targets core 0.15. The axum-login library and its unit/doc tests are
+# unaffected. See: https://github.com/maxcountryman/tower-sessions-stores
 tower-sessions-sqlx-store = { version = "0.15.0", features = ["sqlite"] }
 thiserror = "2.0.0"

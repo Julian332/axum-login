@@ -393,7 +393,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "session"))]
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
@@ -405,8 +405,7 @@ mod tests {
     };
     use tower::ServiceExt;
     use tower_cookies::cookie;
-    use tower_sessions::SessionManagerLayer;
-    use tower_sessions_sqlx_store::{sqlx::SqlitePool, SqliteStore};
+    use tower_sessions::{MemoryStore, SessionManagerLayer};
 
     use crate::{
         require::{
@@ -420,9 +419,7 @@ mod tests {
 
     macro_rules! auth_layer {
         () => {{
-            let pool = SqlitePool::connect(":memory:").await.unwrap();
-            let session_store = SqliteStore::new(pool.clone());
-            session_store.migrate().await.unwrap();
+            let session_store = MemoryStore::default();
 
             let session_layer = SessionManagerLayer::new(session_store).with_secure(false);
 

@@ -248,7 +248,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "session"))]
 mod tests {
     use std::{
         sync::{

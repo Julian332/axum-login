@@ -48,6 +48,43 @@ pub trait AuthUser: Debug + Clone + Send + Sync {
     /// For example, if users have passwords, this method might return a
     /// cryptographically secure hash of that password.
     fn session_auth_hash(&self) -> &[u8];
+
+    /// Encodes a sanitized view of the user for embedding in JWT claims.
+    ///
+    /// The stateless JWT path (feature `jwt`) reconstructs the user directly
+    /// from claims, without querying the backend. **You must strip sensitive
+    /// fields here** — password hashes, secrets, and anything you wouldn't put
+    /// in a bearer token that lives client-side.
+    ///
+    /// Note that unlike the session path, [`session_auth_hash`] does *not*
+    /// participate in verification of a JWT: token lifetime is bounded by the
+    /// token's `exp` claim instead. Changing a password will therefore not
+    /// invalidate an already-issued JWT.
+    ///
+    /// The default implementation serializes the whole user via `serde`, which
+    /// is only correct when the user type carries no sensitive fields.
+    ///
+    /// [`session_auth_hash`]: AuthUser::session_auth_hash
+    #[cfg(feature = "jwt")]
+    fn to_claims(&self) -> serde_json::Value
+    where
+        Self: serde::Serialize,
+    {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Reconstructs the user from JWT claims previously produced by
+    /// [`to_claims`](AuthUser::to_claims).
+    ///
+    /// Returns `None` when the claims cannot be deserialized into `Self`, in
+    /// which case the request is treated as unauthenticated.
+    #[cfg(feature = "jwt")]
+    fn from_claims(claims: &serde_json::Value) -> Option<Self>
+    where
+        Self: for<'de> Deserialize<'de>,
+    {
+        serde_json::from_value(claims.clone()).ok()
+    }
 }
 
 /// A backend which can authenticate users.
@@ -132,7 +169,7 @@ pub trait AuthnBackend: Clone + Send + Sync {
         &self,
         creds: Self::Credentials,
     ) -> impl Future<Output = Result<Option<Self::User>, Self::Error>> + Send;
-
+    // #[cfg(not(feature = "jwt"))]
     /// Gets the user by provided ID from the backend.
     fn get_user(
         &self,

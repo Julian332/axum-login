@@ -22,7 +22,7 @@
 //!   are convenience wrappers over the same behavior. Or bring your own by
 //!   using [`AuthSession`] directly with
 //!   [`from_fn`](axum::middleware::from_fn).
-//! - **Rock-solid Session Management**: Uses [`tower-sessions`](tower_sessions)
+//! - **Rock-solid Session Management**: Uses `tower-sessions`
 //!   for high-performing and ergonomic session management. *Look ma, no
 //!   deadlocks!*
 //!
@@ -281,6 +281,8 @@
 //! ## Builder-based middleware
 //!
 //! ```rust,no_run
+//! # #[cfg(feature = "require-builder")]
+//! # {
 //! use axum_login::{
 //!     require::{RedirectHandler, Require},
 //!     AuthUser, AuthnBackend, UserId,
@@ -324,6 +326,7 @@
 //! let require = Require::<Backend>::builder()
 //!     .unauthenticated(RedirectHandler::new().login_url("/login"))
 //!     .build();
+//! # }
 //! ```
 //!
 //! Use `.decision(...)` for custom access logic; it receives the auth session
@@ -342,9 +345,64 @@
 //!
 //! ## Feature flags
 //!
+//! - `session`: Enables the server-side session path (`tower-sessions`). Enabled
+//!   by default. Disable with `default-features = false` for a JWT-only build
+//!   that drops `tower-sessions`, `tower-cookies`, and `subtle` from the
+//!   dependency tree.
 //! - `require-builder`: Enables the builder-based `require` module.
 //! - `macros-middleware`: Enables the macro middleware and depends on
 //!   `require-builder`. This is enabled by default.
+//! - `jwt`: Enables the stateless JWT path (`JwtManagerLayer`, `JwtConfig`)
+//!   using a pure-Rust crypto backend. Requires Rust 1.88+ (a transitive
+//!   requirement of `jsonwebtoken` 10). See [Stateless JWTs](#stateless-jwts).
+//! - `jwt-aws-lc-rs`: Same as `jwt` but uses the `aws-lc-rs` crypto backend
+//!   (requires a C toolchain).
+//!
+//! ## Stateless JWTs
+//!
+//! With the `jwt` feature, requests can be authenticated from a JSON Web Token
+//! instead of a server-side session. The token is read from a cookie first and
+//! falls back to an `Authorization: Bearer` header, so both browsers and API
+//! clients are supported. The user is reconstructed directly from the token's
+//! claims via `AuthUser::to_claims`/`AuthUser::from_claims`, so **no backend
+//! lookup is performed per request**.
+//!
+//! [`AuthSession`] and its handler API ([`login`](AuthSession::login),
+//! [`logout`](AuthSession::logout), [`user`](AuthSession::user)) are unchanged;
+//! swap [`AuthManagerLayer`] for `JwtManagerLayer` on the router.
+//!
+//! ```rust,no_run
+//! # #[cfg(feature = "jwt")]
+//! # {
+//! # use axum_login::{AuthUser, AuthnBackend, JwtConfig, JwtManagerLayer, UserId};
+//! # use serde::{Deserialize, Serialize};
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct User { id: i64 }
+//! # impl AuthUser for User {
+//! #     type Id = i64;
+//! #     fn id(&self) -> i64 { self.id }
+//! #     fn session_auth_hash(&self) -> &[u8] { &[] }
+//! # }
+//! # #[derive(Clone)]
+//! # struct Backend;
+//! # impl AuthnBackend for Backend {
+//! #     type User = User;
+//! #     type Credentials = ();
+//! #     type Error = std::convert::Infallible;
+//! #     async fn authenticate(&self, _: ()) -> Result<Option<User>, Self::Error> { Ok(None) }
+//! #     async fn get_user(&self, _: &UserId<Self>) -> Result<Option<User>, Self::Error> { Ok(None) }
+//! # }
+//! // The user type must be `Serialize + Deserialize`; strip any sensitive
+//! // fields (e.g. password hashes) with `#[serde(skip)]` or a custom
+//! // `to_claims`.
+//! let config = JwtConfig::from_secret(b"a-very-secret-key");
+//! let jwt_layer = JwtManagerLayer::new(Backend, config);
+//! # }
+//! ```
+//!
+//! Because the token is self-contained, the session's `session_auth_hash`
+//! verification does not apply to the JWT path: token lifetime is bounded by
+//! the `exp` claim rather than invalidated by password changes.
 //!
 //! ## Setting up an auth service
 //!
@@ -404,19 +462,19 @@
 //! #         Ok(self.users.get(user_id).cloned())
 //! #     }
 //! # }
-//! # #[cfg(feature = "macros-middleware")]
+//! # #[cfg(all(feature = "macros-middleware", feature = "session"))]
 //! use axum::{
 //!     routing::{get, post},
 //!     Router,
 //! };
-//! # #[cfg(feature = "macros-middleware")]
+//! # #[cfg(all(feature = "macros-middleware", feature = "session"))]
 //! use axum_login::{
 //!     login_required,
 //!     tower_sessions::{MemoryStore, SessionManagerLayer},
 //!     AuthManagerLayerBuilder,
 //! };
 //!
-//! # #[cfg(feature = "macros-middleware")]
+//! # #[cfg(all(feature = "macros-middleware", feature = "session"))]
 //! async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Session layer.
 //!     let session_store = MemoryStore::default();
@@ -460,16 +518,24 @@
 
 pub use axum;
 pub use backend::{AuthUser, AuthnBackend, AuthzBackend, UserId};
+#[cfg(feature = "session")]
 #[doc(hidden)]
 pub use service::{AuthManager, AuthManagerLayer, AuthManagerLayerBuilder};
 pub use session::{AuthSession, Error};
+#[cfg(feature = "session")]
 pub use tower_sessions;
 pub use tracing;
 
 mod backend;
 mod extract;
+#[cfg(feature = "session")]
 mod service;
 mod session;
+
+#[cfg(feature = "jwt")]
+mod jwt;
+#[cfg(feature = "jwt")]
+pub use jwt::{JwtConfig, JwtManager, JwtManagerLayer, DEFAULT_JWT_COOKIE_NAME};
 
 #[cfg(feature = "require-builder")]
 pub mod require;

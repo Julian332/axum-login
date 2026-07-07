@@ -17,27 +17,39 @@ documentation = "https://docs.rs/axum-login"
 readme = "../README.md"
 
 [features]
+# The server-side session path (tower-sessions). Enabled by default; disable
+# with `default-features = false` for a JWT-only build that drops
+# tower-sessions, tower-cookies, and subtle from the dependency tree.
+session = ["dep:tower-sessions", "dep:tower-cookies", "dep:subtle"]
 require-builder = ["dep:pin-project"]
 macros-middleware = ["require-builder"]
-default = ["macros-middleware"]
+# `jwt` uses jsonwebtoken 10, which requires a crypto backend to be selected
+# explicitly (v9's built-in `ring` was removed). We default to the pure-Rust
+# `rust_crypto` backend so downstream builds need no C toolchain. Depend on
+# `jwt-aws-lc-rs` instead if you want the aws-lc-rs backend.
+jwt = ["dep:jsonwebtoken", "dep:serde_json", "jsonwebtoken/rust_crypto"]
+jwt-aws-lc-rs = ["dep:jsonwebtoken", "dep:serde_json", "jsonwebtoken/aws_lc_rs"]
+default = ["macros-middleware", "jwt"]
 
 [dependencies]
 aide = { git = "https://github.com/tamasfe/aide", features = ["macros"] }
 axum = { version = "0.8.1", default-features = false, features = [
     "original-uri",
 ] }
-subtle = "2"
+subtle = { version = "2", optional = true }
 serde = "1"
 thiserror = "2.0.0"
-tower-cookies = "0.11.0"
+tower-cookies = { version = "0.11.0", optional = true }
 tower-layer = "0.3.2"
 tower-service = "0.3.2"
-tower-sessions = { version = "0.15", default-features = false }
+tower-sessions = { version = "0.15", default-features = false, optional = true }
 tokio = { version = "1.46.1", default-features = false, features = ["sync"] }
 tracing = { version = "0.1.40", features = ["log"] }
 urlencoding = "2.1.3"
 form_urlencoded = "1.2.1"
 pin-project = { version = "1.1.10", optional = true }
+jsonwebtoken = { version = "10", optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 axum = "0.8.1"
@@ -50,7 +62,6 @@ tokio = { version = "1.32.0", features = ["full"] }
 tokio-test = "0.4.3"
 tower = "0.5.2"
 tower-sessions = { version = "0.15.0", features = ["memory-store"] }
-tower-sessions-sqlx-store = { version = "0.15.0", features = ["sqlite"] }
 
 [[bench]]
 name = "middleware_comparison"

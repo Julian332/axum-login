@@ -1,50 +1,67 @@
 use std::{fmt::Debug, sync::Arc};
 use aide::OperationIo;
+#[cfg(feature = "session")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "session")]
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
+#[cfg(feature = "session")]
 use tower_sessions::{session, Session};
 
-use crate::{
-    backend::{AuthUser, UserId},
-    AuthnBackend,
-};
+#[cfg(feature = "session")]
+use crate::backend::UserId;
+use crate::{backend::AuthUser, AuthnBackend};
+
+#[cfg(not(any(feature = "session", feature = "jwt")))]
+compile_error!("axum-login requires at least one of the `session` or `jwt` features");
 
 /// An error type which maps session and backend errors.
 #[derive(thiserror::Error)]
 pub enum Error<Backend: AuthnBackend> {
     /// A mapping to `tower_sessions::session::Error'.
+    #[cfg(feature = "session")]
     #[error(transparent)]
     Session(session::Error),
 
     /// A mapping to `Backend::Error`.
     #[error(transparent)]
     Backend(Backend::Error),
+
+    /// A mapping to a JWT encoding/decoding error.
+    #[cfg(feature = "jwt")]
+    #[error(transparent)]
+    Jwt(jsonwebtoken::errors::Error),
 }
 
 impl<Backend: AuthnBackend> Debug for Error<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "session")]
             Error::Session(err) => write!(f, "{err:?}")?,
             Error::Backend(err) => write!(f, "{err:?}")?,
+            #[cfg(feature = "jwt")]
+            Error::Jwt(err) => write!(f, "{err:?}")?,
         };
 
         Ok(())
     }
 }
 
+#[cfg(feature = "session")]
 impl<Backend: AuthnBackend> From<session::Error> for Error<Backend> {
     fn from(value: session::Error) -> Self {
         Self::Session(value)
     }
 }
 
+#[cfg(feature = "session")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Data<UserId> {
     user_id: Option<UserId>,
     auth_hash: Option<Vec<u8>>,
 }
 
+#[cfg(feature = "session")]
 impl<UserId: Clone> Default for Data<UserId> {
     fn default() -> Self {
         Self {
@@ -54,12 +71,38 @@ impl<UserId: Clone> Default for Data<UserId> {
     }
 }
 
+/// The source backing an [`AuthSession`].
+///
+/// The session path stores identity server-side (via `tower-sessions`) and
+/// verifies it against the backend on each request. The stateless JWT path
+/// (feature `jwt`) reconstructs the user from the token's claims and never
+/// touches the backend per request.
 #[derive(Debug, Clone)]
-struct Inner<Backend: AuthnBackend> {
-    session: Session,
-    user: Option<Backend::User>,
-    data: Data<UserId<Backend>>,
-    data_key: &'static str,
+enum Inner<Backend: AuthnBackend> {
+    #[cfg(feature = "session")]
+    Session {
+        session: Session,
+        user: Option<Backend::User>,
+        data: Data<UserId<Backend>>,
+        data_key: &'static str,
+    },
+
+    #[cfg(feature = "jwt")]
+    Jwt {
+        user: Option<Backend::User>,
+        pending: Option<crate::jwt::PendingCookie>,
+    },
+}
+
+impl<Backend: AuthnBackend> Inner<Backend> {
+    fn user(&self) -> Option<Backend::User> {
+        match self {
+            #[cfg(feature = "session")]
+            Inner::Session { user, .. } => user.clone(),
+            #[cfg(feature = "jwt")]
+            Inner::Jwt { user, .. } => user.clone(),
+        }
+    }
 }
 
 /// A specialized session for identification, authentication, and authorization
@@ -94,7 +137,7 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
 
     /// Returns the user that's authenicated to this session otherwise `None`.
     pub async fn user(&self) -> Option<Backend::User> {
-        self.inner.lock().await.user.clone()
+        self.inner.lock().await.user()
     }
 
     /// Verifies the provided credentials via the backend returning the
@@ -118,48 +161,104 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
     }
 
     /// Updates the session such that the user is logged in.
+    ///
+    /// In the JWT path (feature `jwt`) this marks the session for a token to be
+    /// issued; the token is signed and written as a cookie by the JWT
+    /// middleware once the handler returns.
     #[tracing::instrument(level = "debug", skip_all, fields(user.id = user.id().to_string()), ret, err)]
     pub async fn login(&self, user: &Backend::User) -> Result<(), Error<Backend>> {
-        {
-            let mut inner = self.inner.lock().await;
-            inner.user = Some(user.clone());
+        let mut inner = self.inner.lock().await;
+        match &mut *inner {
+            #[cfg(feature = "session")]
+            Inner::Session {
+                session,
+                user: current,
+                data,
+                data_key,
+            } => {
+                *current = Some(user.clone());
 
-            if inner.data.auth_hash.is_none() {
-                inner.session.cycle_id().await?; // Session-fixation mitigation.
+                if data.auth_hash.is_none() {
+                    session.cycle_id().await?; // Session-fixation mitigation.
+                }
+
+                data.user_id = Some(user.id());
+                data.auth_hash = Some(user.session_auth_hash().to_owned());
+
+                session.insert(data_key, data.clone()).await?;
             }
 
-            inner.data.user_id = Some(user.id());
-            inner.data.auth_hash = Some(user.session_auth_hash().to_owned());
+            #[cfg(feature = "jwt")]
+            Inner::Jwt {
+                user: current,
+                pending,
+            } => {
+                *current = Some(user.clone());
+                *pending = Some(crate::jwt::PendingCookie::Issue);
+            }
         }
-
-        self.update_session().await?;
 
         Ok(())
     }
 
     /// Updates the session such that the user is logged out.
+    ///
+    /// In the JWT path (feature `jwt`) this marks the token cookie for removal;
+    /// the expiring cookie is written by the JWT middleware once the handler
+    /// returns.
     #[tracing::instrument(level = "debug", skip_all, fields(user.id), ret, err)]
     pub async fn logout(&self) -> Result<Option<Backend::User>, Error<Backend>> {
         let mut inner = self.inner.lock().await;
-        let user = inner.user.take();
+        let user = match &mut *inner {
+            #[cfg(feature = "session")]
+            Inner::Session { session, user, .. } => {
+                let user = user.take();
+                session.flush().await?;
+                user
+            }
+
+            #[cfg(feature = "jwt")]
+            Inner::Jwt { user, pending } => {
+                let user = user.take();
+                *pending = Some(crate::jwt::PendingCookie::Clear);
+                user
+            }
+        };
 
         if let Some(ref user) = user {
             tracing::Span::current().record("user.id", user.id().to_string());
         }
 
-        inner.session.flush().await?;
-
         Ok(user)
     }
 
-    async fn update_session(&self) -> Result<(), session::Error> {
-        let inner = self.inner.lock().await;
-        inner
-            .session
-            .insert(inner.data_key, inner.data.clone())
-            .await
+    /// Builds a stateless auth session from a user already decoded from a JWT.
+    ///
+    /// No backend lookup is performed; the user is taken verbatim from the
+    /// token's claims.
+    #[cfg(feature = "jwt")]
+    pub(crate) fn from_jwt(backend: Backend, user: Option<Backend::User>) -> Self {
+        Self {
+            backend,
+            inner: Arc::new(Mutex::new(Inner::Jwt {
+                user,
+                pending: None,
+            })),
+        }
     }
 
+    /// Takes any pending cookie action recorded by [`login`](Self::login) or
+    /// [`logout`](Self::logout) in the JWT path, clearing it.
+    #[cfg(feature = "jwt")]
+    pub(crate) async fn take_pending_cookie(&self) -> Option<crate::jwt::PendingCookie> {
+        match &mut *self.inner.lock().await {
+            Inner::Jwt { pending, .. } => pending.take(),
+            #[cfg(feature = "session")]
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "session")]
     pub(crate) async fn from_session(
         session: Session,
         backend: Backend,
@@ -186,7 +285,7 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
             }
         }
 
-        let inner = Arc::new(Mutex::new(Inner {
+        let inner = Arc::new(Mutex::new(Inner::Session {
             user,
             session,
             data,
@@ -197,7 +296,7 @@ impl<Backend: AuthnBackend> AuthSession<Backend> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "session"))]
 mod tests {
     use std::sync::Arc;
 
@@ -275,7 +374,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
 
         let session = Session::new(None, store, None);
-        let inner = Inner {
+        let inner = Inner::Session {
             user: None,
             session,
             data: Data::default(),
@@ -305,7 +404,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
 
         let session = Session::new(None, store, None);
-        let inner = Inner {
+        let inner = Inner::Session {
             user: None,
             session,
             data: Data::default(),
@@ -331,7 +430,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let session = Session::new(None, store, None);
         let original_session_id = session.id();
-        let inner = Inner {
+        let inner = Inner::Session {
             user: None,
             session: session.clone(),
             data: Data::default(),
@@ -366,7 +465,7 @@ mod tests {
 
         let store = Arc::new(MemoryStore::default());
         let session = Session::new(None, store, None);
-        let inner = Inner {
+        let inner = Inner::Session {
             user: Some(mock_user),
             session,
             data: Data::default(),
