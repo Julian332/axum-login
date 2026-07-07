@@ -28,13 +28,7 @@
 
 use std::collections::HashMap;
 
-use axum::{
-    extract::Query,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
-};
+use axum::{extract::Query, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use axum_login::{AuthUser, AuthnBackend, JwtConfig, JwtManagerLayer, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +116,7 @@ async fn protected(auth_session: AuthSession) -> Response {
     }
 }
 
-async fn login(auth_session: AuthSession, Query(creds): Query<Credentials>) -> Response {
+async fn login(auth_session: AuthSession, Json(creds): Json<Credentials>) -> Response {
     match auth_session.authenticate(creds).await {
         Ok(Some(user)) => {
             if auth_session.login(&user).await.is_err() {
@@ -153,6 +147,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(protected))
+        .route("/", post(protected))
         .route("/login", post(login))
         .route("/logout", get(logout))
         .layer(JwtManagerLayer::new(Backend::seeded(), config));

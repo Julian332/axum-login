@@ -59,16 +59,19 @@
 //! #         Ok(self.users.get(user_id).cloned())
 //! #     }
 //! # }
+//! # #[cfg(feature = "session")]
 //! use axum::{
 //!     routing::{get, post},
 //!     Router,
 //! };
+//! # #[cfg(feature = "session")]
 //! use axum_login::{
 //!     require::{PermissionsPredicate, RedirectHandler, Require},
 //!     tower_sessions::{MemoryStore, SessionManagerLayer},
 //!     AuthManagerLayerBuilder,
 //! };
 //!
+//! # #[cfg(feature = "session")]
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Session layer.
@@ -96,6 +99,8 @@
 //!
 //!     Ok(())
 //! }
+//! # #[cfg(not(feature = "session"))]
+//! # fn main() {}
 //! ```
 //!
 //! ## Common patterns

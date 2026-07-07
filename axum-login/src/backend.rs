@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Type alias for the backend user's ID.
 pub type UserId<Backend> = <<Backend as AuthnBackend>::User as AuthUser>::Id;
@@ -83,7 +84,7 @@ pub trait AuthUser: Debug + Clone + Send + Sync {
     where
         Self: for<'de> Deserialize<'de>,
     {
-        serde_json::from_value(claims.clone()).ok()
+        serde_json::from_value(claims.clone()).inspect_err(|e|warn!(?e)).ok()
     }
 }
 

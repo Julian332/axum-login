@@ -104,17 +104,20 @@ let jwt_layer = JwtManagerLayer::new(backend, config);
 
 > **MSRV**：`jwt` feature 依赖 `jsonwebtoken` 10，要求 Rust ≥ 1.88。
 
-## 只要 JWT，不要 session（去掉 tower-sessions 依赖）
+## Feature 与依赖
 
-session 路径挂在默认开启的 `session` feature 下。只需 JWT 时，关掉默认 features
-即可把 `tower-sessions` / `tower-cookies` / `subtle` 从依赖树移除：
+默认 features 为 `macros-middleware` + `jwt`——**开箱即用的是 JWT 路径，不含
+`tower-sessions`**。
 
 ```toml
-[dependencies]
-axum-login = { version = "*", default-features = false, features = ["jwt"] }
-# 需要路由保护宏时再加 "macros-middleware"（它不依赖 tower-sessions）
+# 默认：JWT + 路由保护宏，无 tower-sessions / tower-cookies
+axum-login = "*"
+
+# 需要服务端 session 路径时，显式启用 session
+axum-login = { version = "*", features = ["session"] }
 ```
 
-Cargo feature 是「叠加」语义——无法靠「启用 jwt 自动删掉 session」，只能通过关闭
-`session` feature 来去掉。两者都要时用 `features = ["session", "jwt"]`。
+`session` feature 挂载 `tower-sessions` / `tower-cookies` / `subtle`；不启用它，
+这三个依赖就不会进入依赖树。Cargo feature 是「叠加」语义，故用「是否启用
+`session`」来决定要不要 session 路径，而非靠 jwt 去删它。
 

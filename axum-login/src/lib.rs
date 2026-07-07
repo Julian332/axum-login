@@ -345,16 +345,19 @@
 //!
 //! ## Feature flags
 //!
-//! - `session`: Enables the server-side session path (`tower-sessions`). Enabled
-//!   by default. Disable with `default-features = false` for a JWT-only build
-//!   that drops `tower-sessions`, `tower-cookies`, and `subtle` from the
-//!   dependency tree.
+//! The default features are `macros-middleware` and `jwt`. Enable `session`
+//! explicitly for the server-side session path.
+//!
+//! - `session`: Enables the server-side session path (`tower-sessions`). Not in
+//!   the default set: enable it when you want sessions. Omitting it keeps
+//!   `tower-sessions`, `tower-cookies`, and `subtle` out of the dependency tree.
 //! - `require-builder`: Enables the builder-based `require` module.
 //! - `macros-middleware`: Enables the macro middleware and depends on
 //!   `require-builder`. This is enabled by default.
 //! - `jwt`: Enables the stateless JWT path (`JwtManagerLayer`, `JwtConfig`)
-//!   using a pure-Rust crypto backend. Requires Rust 1.88+ (a transitive
-//!   requirement of `jsonwebtoken` 10). See [Stateless JWTs](#stateless-jwts).
+//!   using a pure-Rust crypto backend. Enabled by default. Requires Rust 1.88+
+//!   (a transitive requirement of `jsonwebtoken` 10). See
+//!   [Stateless JWTs](#stateless-jwts).
 //! - `jwt-aws-lc-rs`: Same as `jwt` but uses the `aws-lc-rs` crypto backend
 //!   (requires a C toolchain).
 //!
