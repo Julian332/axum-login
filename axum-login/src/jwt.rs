@@ -490,17 +490,18 @@ where
                 None
             };
 
-            // Authenticate from the access token; otherwise fall back to a valid
-            // refresh token, which also mints a fresh access cookie.
-            let user = match access_user {
-                Some(user) => Some(user),
-                None => {
-                    if refresh_user.is_some() {
-                        reissue_access = true;
-                    }
-                    refresh_user
-                }
-            };
+            // A valid refresh token means the client reached the refresh
+            // endpoint (the refresh cookie is `Path`-scoped there), so always
+            // mint a fresh access token — regardless of whether the access
+            // token is still fresh. Without a refresh token, access-token
+            // sliding refresh (computed above) still applies on its own.
+            if refresh_user.is_some() {
+                reissue_access = true;
+            }
+
+            // Authenticate from the access token, falling back to the refresh
+            // token's identity.
+            let user = access_user.or(refresh_user);
 
             if let Some(ref user) = user {
                 tracing::Span::current().record("user.id", user.id().to_string());
@@ -699,7 +700,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static("other=1; axum-login.jwt=cookie-token; foo=bar"),
+            HeaderValue::from_str(&format!(
+                "other=1; {DEFAULT_JWT_COOKIE_NAME}=cookie-token; foo=bar"
+            ))
+            .unwrap(),
         );
         headers.insert(
             header::AUTHORIZATION,
@@ -907,7 +911,7 @@ mod middleware_tests {
             .await
             .unwrap();
         let cookie = set_cookie(&res).expect("login should set a cookie");
-        assert!(cookie.starts_with("axum-login.jwt="));
+        assert!(cookie.starts_with(&format!("{DEFAULT_JWT_COOKIE_NAME}=")));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Lax"));
         assert!(!cookie.contains("Secure")); // with_secure(false)
@@ -919,7 +923,7 @@ mod middleware_tests {
             .oneshot(
                 Request::builder()
                     .uri("/whoami")
-                    .header(header::COOKIE, format!("axum-login.jwt={token}"))
+                    .header(header::COOKIE, format!("{DEFAULT_JWT_COOKIE_NAME}={token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -971,7 +975,7 @@ mod middleware_tests {
             .await
             .unwrap();
         let cookie = set_cookie(&res).expect("logout should set an expiring cookie");
-        assert!(cookie.starts_with("axum-login.jwt="));
+        assert!(cookie.starts_with(&format!("{DEFAULT_JWT_COOKIE_NAME}=")));
         assert!(cookie.contains("Max-Age=0"));
     }
 
@@ -985,7 +989,10 @@ mod middleware_tests {
             .oneshot(
                 Request::builder()
                     .uri("/whoami")
-                    .header(header::COOKIE, "axum-login.jwt=not-a-valid-token")
+                    .header(
+                        header::COOKIE,
+                        format!("{DEFAULT_JWT_COOKIE_NAME}=not-a-valid-token"),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1017,7 +1024,7 @@ mod middleware_tests {
         app.oneshot(
             Request::builder()
                 .uri("/whoami")
-                .header(header::COOKIE, format!("axum-login.jwt={token}"))
+                .header(header::COOKIE, format!("{DEFAULT_JWT_COOKIE_NAME}={token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1036,7 +1043,7 @@ mod middleware_tests {
 
         let res = whoami_with_cookie(app, &token).await;
         let cookie = set_cookie(&res).expect("token in last third should be re-issued");
-        assert!(cookie.starts_with("axum-login.jwt="));
+        assert!(cookie.starts_with(&format!("{DEFAULT_JWT_COOKIE_NAME}=")));
         assert!(cookie.contains("Max-Age="));
         assert!(!cookie.contains("Max-Age=0")); // a real token, not a clear
         assert_eq!(body_string(res).await, "alice");
@@ -1151,6 +1158,38 @@ mod middleware_tests {
             find_set_cookie(&res, REFRESH_COOKIE).is_none(),
             "a fresh refresh token should not be rotated"
         );
+        assert_eq!(body_string(res).await, "alice");
+    }
+
+    #[tokio::test]
+    async fn both_cookies_present_always_mints_new_access() {
+        // Both a fresh access token and a valid refresh token — i.e. the client
+        // hit the refresh endpoint. A new access token must be issued even
+        // though the access token is nowhere near expiry.
+        let app = refresh_app(Backend {
+            get_user_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let now = now_unix();
+        let access = craft_token(now, now + 1000, TokenKind::Access); // fresh
+        let refresh = craft_refresh_token(now, now + 1000); // fresh
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/whoami")
+                    .header(
+                        header::COOKIE,
+                        format!("{DEFAULT_JWT_COOKIE_NAME}={access}; {REFRESH_COOKIE}={refresh}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let minted = find_set_cookie(&res, DEFAULT_JWT_COOKIE_NAME)
+            .expect("a valid refresh token should always mint a fresh access cookie");
+        assert!(!minted.contains("Max-Age=0"));
         assert_eq!(body_string(res).await, "alice");
     }
 

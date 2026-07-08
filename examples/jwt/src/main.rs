@@ -16,10 +16,10 @@
 //! # Browser-style: send the cookie back.
 //! curl -b jar.txt http://localhost:3000/
 //!
-//! # API-style: pull the token out of the Set-Cookie header and send it as a
-//! # Bearer header (no cookie).
+//! # API-style: pull the access token out of its Set-Cookie header and send it
+//! # as a Bearer header (no cookie).
 //! TOKEN=$(curl -si -X POST 'http://localhost:3000/login?username=ferris&password=hunter2' \
-//!   | grep -i '^set-cookie:' | sed -E 's/.*axum-login\.jwt=([^;]+).*/\1/')
+//!   | grep -i '^set-cookie: auth.access=' | sed -E 's/.*auth\.access=([^;]+).*/\1/')
 //! curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/
 //!
 //! # Log out clears both cookies.

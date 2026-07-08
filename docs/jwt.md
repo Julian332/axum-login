@@ -32,7 +32,7 @@ token**。时效由 `exp` 决定。
 
 ## C. 请求进来 · 认证（无状态）
 
-1. **提取 token** — `extract_token()`：先查 cookie `axum-login.jwt`，缺失则退回
+1. **提取 token** — `extract_token()`：先查 cookie `auth.access`，缺失则退回
    `Authorization: Bearer`。
 2. **验签 + 解码** — `config.decode()`：校验签名与 `exp` 过期；无 token / 篡改 /
    过期 → `None`（降级为匿名）。
@@ -59,7 +59,7 @@ JWT 模式下**不立即签发**，只在共享的 `Inner::Jwt` 里打标记：
 handler 返回后，中间件通过共享句柄读取标记（`take_pending_cookie()`）：
 
 - **Issue** → `encode(&user)` 签发 JWT →
-  `Set-Cookie: axum-login.jwt=…; Path=/; HttpOnly; SameSite=Lax; Max-Age=<ttl>`
+  `Set-Cookie: auth.access=…; Path=/; HttpOnly; SameSite=Lax; Max-Age=<ttl>`
   （`with_secure(true)` 时追加 `Secure`）。
 - **Clear** → 写 `Max-Age=0` 过期 cookie。
 - **无标记，但 token 剩余寿命 ≤ 1/3** → 滑动刷新（见下）自动重签。
@@ -81,7 +81,7 @@ handler 返回后，中间件通过共享句柄读取标记（`take_pending_cook
 ① POST /login  （无 token）
    JwtManager  extract→无 · decode→None · AuthSession(user=None)
    handler     authenticate(creds)→user · login(user) → 标记 Issue
-   JwtManager  pending=Issue · encode · Set-Cookie: axum-login.jwt=eyJ…
+   JwtManager  pending=Issue · encode · Set-Cookie: auth.access=eyJ…
                                                   ↓ 客户端保存 token
 
 ② GET /   （带 cookie 或 Bearer）
@@ -119,15 +119,16 @@ let jwt_layer = JwtManagerLayer::new(backend, config);
 
 默认关闭，`with_refresh_enabled(true)` 开启。开启后：
 
-- `login()` 除签发短期 **access token**（cookie `axum-login.jwt`，`Path=/`）外，
-  额外签发长期 **refresh token**（cookie `axum-login.refresh`，`Path` 由
+- `login()` 除签发短期 **access token**（cookie `auth.access`，`Path=/`）外，
+  额外签发长期 **refresh token**（cookie `auth.refresh`，`Path` 由
   `with_refresh_path` 设置，如 `/auth/refresh`）。两种 token 用 `typ` claim
   （`access` / `refresh`）区分，互相不可冒用。
 - 因为 refresh cookie 带 `Path` 作用域，浏览器**只在刷新端点**附带它。普通请求只
   认 access token；access 过期即匿名。
 - 命中刷新端点（携带了有效 refresh cookie）时，中间件用 refresh token 认证该请求
-  并**自动签发新的 access cookie**（`Path=/`）。刷新端点的 handler 只需读
-  `auth_session.user()` 返回结果即可。
+  并**一定签发新的 access cookie**（`Path=/`）——**无论随请求带来的 access token
+  是否仍然新鲜**，因为「带上了 refresh cookie」本身就代表客户端在请求刷新。刷新
+  端点的 handler 只需读 `auth_session.user()` 返回结果即可。
 - refresh token 同样有 1/3 续杯：当它进入自身寿命的最后 1/3 时，随该请求一并轮换。
 - `logout()` 同时清除 access 与 refresh 两个 cookie。
 
