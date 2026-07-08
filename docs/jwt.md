@@ -115,6 +115,32 @@ let jwt_layer = JwtManagerLayer::new(backend, config);
 
 > **MSRV**：`jwt` feature 依赖 `jsonwebtoken` 10，要求 Rust ≥ 1.88。
 
+## 刷新令牌（refresh token）
+
+默认关闭，`with_refresh_enabled(true)` 开启。开启后：
+
+- `login()` 除签发短期 **access token**（cookie `axum-login.jwt`，`Path=/`）外，
+  额外签发长期 **refresh token**（cookie `axum-login.refresh`，`Path` 由
+  `with_refresh_path` 设置，如 `/auth/refresh`）。两种 token 用 `typ` claim
+  （`access` / `refresh`）区分，互相不可冒用。
+- 因为 refresh cookie 带 `Path` 作用域，浏览器**只在刷新端点**附带它。普通请求只
+  认 access token；access 过期即匿名。
+- 命中刷新端点（携带了有效 refresh cookie）时，中间件用 refresh token 认证该请求
+  并**自动签发新的 access cookie**（`Path=/`）。刷新端点的 handler 只需读
+  `auth_session.user()` 返回结果即可。
+- refresh token 同样有 1/3 续杯：当它进入自身寿命的最后 1/3 时，随该请求一并轮换。
+- `logout()` 同时清除 access 与 refresh 两个 cookie。
+
+```rust
+let config = JwtConfig::from_secret(b"secret")
+    .with_ttl(Duration::from_secs(60))                 // 短 access
+    .with_refresh_enabled(true)
+    .with_refresh_path("/auth/refresh")                // refresh cookie 作用域
+    .with_refresh_ttl(Duration::from_secs(60 * 60 * 24 * 7)); // 长 refresh
+```
+
+可运行示例（含 `/auth/refresh` 端点与 curl 演示）见 [`examples/jwt`](../examples/jwt)。
+
 ## Feature 与依赖
 
 默认 features 为 `macros-middleware` + `jwt`——**开箱即用的是 JWT 路径，不含

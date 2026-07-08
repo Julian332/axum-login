@@ -22,13 +22,17 @@
 //!   | grep -i '^set-cookie:' | sed -E 's/.*axum-login\.jwt=([^;]+).*/\1/')
 //! curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/
 //!
-//! # Log out clears the cookie.
+//! # Log out clears both cookies.
 //! curl -i -b jar.txt http://localhost:3000/logout
+//!
+//! # Refresh: login also sets a long-lived refresh cookie scoped to
+//! # /auth/refresh. Hitting that endpoint mints a fresh (short) access cookie.
+//! curl -i -b jar.txt http://localhost:3000/auth/refresh
 //! ```
 
 use std::collections::HashMap;
 
-use axum::{extract::Query, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
+use axum::{extract::Query, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}, Router};
 use axum_login::{AuthUser, AuthnBackend, JwtConfig, JwtManagerLayer, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +120,7 @@ async fn protected(auth_session: AuthSession) -> Response {
     }
 }
 
-async fn login(auth_session: AuthSession, Json(creds): Json<Credentials>) -> Response {
+async fn login(auth_session: AuthSession, Query(creds): Query<Credentials>) -> Response {
     match auth_session.authenticate(creds).await {
         Ok(Some(user)) => {
             if auth_session.login(&user).await.is_err() {
@@ -136,6 +140,16 @@ async fn logout(auth_session: AuthSession) -> impl IntoResponse {
     "logged-out\n"
 }
 
+// The refresh cookie is scoped to `/auth/refresh`, so browsers only send it
+// here. The middleware validates it and mints a fresh access cookie
+// automatically; this handler just confirms who was refreshed.
+async fn refresh(auth_session: AuthSession) -> impl IntoResponse {
+    match auth_session.user().await {
+        Some(user) => format!("refreshed access token for {}\n", user.username).into_response(),
+        None => (StatusCode::UNAUTHORIZED, "no valid refresh token\n").into_response(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -143,13 +157,19 @@ async fn main() {
     // Use a strong, secret key in production and keep it out of source control.
     let config = JwtConfig::from_secret(b"a-very-secret-key")
         // Allow the cookie over plain HTTP for this local example.
-        .with_secure(false);
+        .with_secure(false)
+        // Short access token; long refresh token scoped to the refresh endpoint.
+        .with_ttl(std::time::Duration::from_secs(60))
+        .with_refresh_enabled(true)
+        .with_refresh_path("/auth/refresh")
+        .with_refresh_ttl(std::time::Duration::from_secs(60 * 60 * 24 * 7));
 
     let app = Router::new()
         .route("/", get(protected))
         .route("/", post(protected))
         .route("/login", post(login))
         .route("/logout", get(logout))
+        .route("/auth/refresh", get(refresh))
         .layer(JwtManagerLayer::new(Backend::seeded(), config));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
